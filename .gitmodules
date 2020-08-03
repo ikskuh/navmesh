@@ -1,0 +1,3 @@
+[submodule "lib/zig-gamedev-lib"]
+	path = lib/zig-gamedev-lib
+	url = https://github.com/MasterQ32/zig-gamedev-lib/
