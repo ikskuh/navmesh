@@ -20,9 +20,18 @@ pub fn build(b: *Builder) void {
     exe.setBuildMode(mode);
     exe.install();
 
+    const test_navmesh = b.addTest("src/navmesh.zig");
+    test_navmesh.addPackage(.{
+        .name = "wavefront-obj",
+        .path = "./lib/zig-gamedev-lib/src/wavefront-obj.zig",
+    });
+
     const run_cmd = exe.run();
     run_cmd.step.dependOn(b.getInstallStep());
 
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
+
+    const test_step = b.step("test", "Tests the navmesh implementation");
+    test_step.dependOn(&test_navmesh.step);
 }

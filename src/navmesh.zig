@@ -165,7 +165,25 @@ pub const Builder = struct {
         }
 
         if (unique_vertices == 0) {
-            // TODO: find if the polygon is already existing, we don't want duplicates
+            // This checks if all our vertices share a common polygon.
+            // If this is the case, we have found a duplicate and can drop it
+            // without any problems
+            const v0 = vertices[0];
+            outer: for (self.deduplication_list.items[v0].items) |p0| {
+                for (vertices[1..]) |v1| {
+                    const contains = for (self.deduplication_list.items[v1].items) |p1| {
+                        if (p1 == p0)
+                            break true;
+                    } else false;
+                    if (!contains)
+                        continue :outer;
+                }
+                // we found a polygon with which is included in all vertices:
+                // this means this polygon or a "superset" already exists,
+                // we can ignore this one
+                self.arena.allocator.free(vertices);
+                return;
+            }
         }
 
         var result = Polygon{
@@ -288,7 +306,40 @@ test "NavMesh Builder (vertex deduplication)" {
     std.testing.expectEqualSlices(?usize, &[_]?usize{ 0, null, null }, mesh.polygons[1].adjacent_polygons);
 }
 
-test "NavMesh Builder (Duplicated Vertex)" {
+test "NavMesh Builder (polygon deduplication)" {
+    var builder = Builder.init(std.testing.allocator);
+    defer builder.deinit();
+
+    try builder.insert(&[_]Vertex{
+        .{ .x = 0, .y = 0, .z = 0 },
+        .{ .x = 1, .y = 0, .z = 0 },
+        .{ .x = 0, .y = 1, .z = 0 },
+    });
+
+    try builder.insert(&[_]Vertex{
+        .{ .x = 0, .y = 0, .z = 0 },
+        .{ .x = 1, .y = 0, .z = 0 },
+        .{ .x = 0, .y = 1, .z = 0 },
+    });
+
+    var mesh = try builder.createMesh(std.testing.allocator);
+    defer mesh.deinit();
+
+    std.testing.expectEqualSlices(Vertex, &[_]Vertex{
+        .{ .x = 0, .y = 0, .z = 0 },
+        .{ .x = 1, .y = 0, .z = 0 },
+        .{ .x = 0, .y = 1, .z = 0 },
+    }, mesh.vertices);
+
+    std.testing.expectEqual(@as(usize, 1), mesh.polygons.len);
+
+    std.testing.expectEqualSlices(usize, &[_]usize{ 0, 1, 2 }, mesh.polygons[0].vertices);
+    std.testing.expectEqualSlices(?usize, &[_]?usize{ null, null, null }, mesh.polygons[0].adjacent_polygons);
+}
+
+test "NavMesh Builder (error.DuplicatedVertex)" {
+    // This test tests if the Builder recognized degenerated polygons that
+    // have multiple vertices in the same location
     var builder = Builder.init(std.testing.allocator);
     defer builder.deinit();
 
@@ -312,6 +363,7 @@ test "NavMesh Builder (Duplicated Vertex)" {
 }
 
 test "NavMesh (OBJ)" {
+    // This testcase tests if the navmesh implementation survives a bigger mesh without any memory leaks
     const wavefront_obj = @import("wavefront-obj");
 
     var builder = Builder.init(std.testing.allocator);
@@ -338,7 +390,4 @@ test "NavMesh (OBJ)" {
 
     var mesh = try builder.createMesh(std.testing.allocator);
     defer mesh.deinit();
-
-    std.debug.print("polygons: {}\n", .{mesh.polygons.len});
-    std.debug.print("vertices: {}\n", .{mesh.vertices.len});
 }
