@@ -16,6 +16,12 @@ pub fn build(b: *Builder) void {
         .name = "wavefront-obj",
         .path = "./lib/zig-gamedev-lib/src/wavefront-obj.zig",
     });
+    exe.addPackage(.{
+        .name = "sdl2",
+        .path = "./lib/SDL.zig/src/lib.zig",
+    });
+    exe.linkSystemLibrary("sdl2");
+    exe.linkLibC();
     exe.setTarget(target);
     exe.setBuildMode(mode);
     exe.install();

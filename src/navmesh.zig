@@ -43,13 +43,31 @@ pub const NavMesh = struct {
     }
 };
 
+/// An edge of a polygon. Each edge has two vertices and an optional adjacent
+/// polygon.
+pub const Edge = struct {
+    v0: usize,
+    v1: usize,
+    adjacent: ?usize,
+};
+
 /// A node in the `NavMesh` tree structure
 pub const Polygon = struct {
+    const Self = @This();
+
     /// The vertex coordinates of the polygon. Each entry is an index into `NavMesh.vertices`.
     vertices: []usize,
 
     /// Adjacent polygons that are connected at vertex `[i]` and `[(i+1)%N]`. Each entry is an index into `NavMesh.polygons`.
     adjacent_polygons: []?usize,
+
+    pub fn getEdge(self: Self, index: usize) Edge {
+        return Edge{
+            .v0 = self.vertices[index],
+            .v1 = self.vertices[(index + 1) % self.vertices.len],
+            .adjacent = self.adjacent_polygons[index],
+        };
+    }
 };
 
 /// A corner of a NavMesh
