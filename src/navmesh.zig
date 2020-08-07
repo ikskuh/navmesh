@@ -26,8 +26,55 @@ pub const NavMesh = struct {
 
     /// Deserializes a previously serialized NavMesh
     pub fn deserialize(allocator: *std.mem.Allocator, reader: anytype) !Self {
-        // TODO
-        unreachable;
+        const vertices_len = try reader.readIntLittle(u64);
+        const polygons_len = try reader.readIntLittle(u64);
+
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        errdefer arena.deinit();
+
+        const vertices = try arena.allocator.alloc(Vertex, vertices_len);
+
+        for (vertices) |*vert| {
+            // TODO: This assumes little endian f32
+            try reader.readNoEof(std.mem.asBytes(&vert.x));
+            try reader.readNoEof(std.mem.asBytes(&vert.y));
+            try reader.readNoEof(std.mem.asBytes(&vert.z));
+        }
+
+        const polygons = try arena.allocator.alloc(Polygon, polygons_len);
+        for (polygons) |*poly| {
+            const poly_size = try reader.readIntLittle(u64);
+
+            const poly_verts = try arena.allocator.alloc(usize, poly_size);
+            for (poly_verts) |*vert_index| {
+                vert_index.* = try reader.readIntLittle(u64);
+                if (vert_index.* >= vertices.len)
+                    return error.InvalidData;
+            }
+
+            const poly_adj = try arena.allocator.alloc(?usize, poly_size);
+            for (poly_adj) |*maybe_poly| {
+                const index = try reader.readIntLittle(u64);
+                maybe_poly.* = if (index != std.math.maxInt(u64))
+                    if (index < polygons.len)
+                        index
+                    else
+                        return error.InvalidData
+                else
+                    null;
+            }
+
+            poly.* = Polygon{
+                .vertices = poly_verts,
+                .adjacent_polygons = poly_adj,
+            };
+        }
+
+        return NavMesh{
+            .arena = arena,
+            .polygons = polygons,
+            .vertices = vertices,
+        };
     }
 
     /// Releases all resources in the NavMesh.
@@ -38,8 +85,27 @@ pub const NavMesh = struct {
 
     /// Serializes the NavMesh into a data stream which can later be deserialized again.
     pub fn serialize(self: Self, writer: anytype) !void {
-        // TODO
-        unreachable;
+        try writer.writeIntLittle(u64, self.vertices.len);
+        try writer.writeIntLittle(u64, self.polygons.len);
+
+        for (self.vertices) |vert| {
+            // TODO: This assumes little endian f32
+            try writer.writeAll(std.mem.asBytes(&vert.x));
+            try writer.writeAll(std.mem.asBytes(&vert.y));
+            try writer.writeAll(std.mem.asBytes(&vert.z));
+        }
+
+        for (self.polygons) |poly| {
+            std.debug.assert(poly.vertices.len == poly.adjacent_polygons.len);
+            try writer.writeIntLittle(u64, poly.vertices.len);
+
+            for (poly.vertices) |vert_index| {
+                try writer.writeIntLittle(u64, vert_index);
+            }
+            for (poly.adjacent_polygons) |maybe_poly| {
+                try writer.writeIntLittle(u64, maybe_poly orelse std.math.maxInt(u64));
+            }
+        }
     }
 };
 
@@ -380,8 +446,7 @@ test "NavMesh Builder (error.DuplicatedVertex)" {
     }));
 }
 
-test "NavMesh (OBJ)" {
-    // This testcase tests if the navmesh implementation survives a bigger mesh without any memory leaks
+fn loadTestMesh() !NavMesh {
     const wavefront_obj = @import("wavefront-obj");
 
     var builder = Builder.init(std.testing.allocator);
@@ -406,6 +471,36 @@ test "NavMesh (OBJ)" {
         }
     }
 
-    var mesh = try builder.createMesh(std.testing.allocator);
+    return try builder.createMesh(std.testing.allocator);
+}
+
+test "NavMesh (OBJ)" {
+    // This testcase tests if the navmesh implementation survives a bigger mesh without any memory leaks
+    var mesh = try loadTestMesh();
     defer mesh.deinit();
+}
+
+test "NavMesh (Serialize/Deserialize)" {
+    // This testcase tests if serialization/deserialization yields the same navmesh
+    var src_mesh = try loadTestMesh();
+    defer src_mesh.deinit();
+
+    var backing_buffer: [65536]u8 = undefined;
+
+    const serialized_len = blk: {
+        var stream = std.io.fixedBufferStream(&backing_buffer);
+        try src_mesh.serialize(stream.writer());
+        break :blk stream.pos;
+    };
+
+    var dst_mesh = try NavMesh.deserialize(std.testing.allocator, std.io.fixedBufferStream(backing_buffer[0..serialized_len]).reader());
+    defer dst_mesh.deinit();
+
+    std.testing.expectEqualSlices(Vertex, src_mesh.vertices, dst_mesh.vertices);
+    std.testing.expectEqual(src_mesh.polygons.len, dst_mesh.polygons.len);
+    for (src_mesh.polygons) |truth, i| {
+        const tested = dst_mesh.polygons[i];
+        std.testing.expectEqualSlices(usize, truth.vertices, tested.vertices);
+        std.testing.expectEqualSlices(?usize, truth.adjacent_polygons, tested.adjacent_polygons);
+    }
 }
