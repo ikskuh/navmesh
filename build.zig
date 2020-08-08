@@ -20,6 +20,10 @@ pub fn build(b: *Builder) void {
         .name = "sdl2",
         .path = "./lib/SDL.zig/src/lib.zig",
     });
+    exe.addPackage(.{
+        .name = "zlm",
+        .path = "./lib/zlm/zlm.zig",
+    });
     exe.linkSystemLibrary("sdl2");
     exe.linkLibC();
     exe.setTarget(target);
