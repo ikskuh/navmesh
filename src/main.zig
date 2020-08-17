@@ -82,14 +82,9 @@ pub const Position = struct {
         };
         if (res.t < 0 or res.t > 1)
             return null;
+
         // if (res.u < 0 or res.u > 1)
         //     return null;
-
-        std.debug.print("({} → {}) | ({} → {}) => t={d}, u={d}\n", .{
-            a[0],  a[1],
-            b[0],  b[1],
-            res.t, res.u,
-        });
 
         return res;
     }
