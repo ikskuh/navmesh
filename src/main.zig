@@ -149,7 +149,19 @@ pub const Position = struct {
 };
 
 pub fn main() anyerror!void {
-    var mesh = try importMesh(std.heap.c_allocator, "./data/basic.obj");
+    var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
+    defer {
+        const leaks = general_purpose_allocator.deinit();
+        if (leaks) {
+            if (std.builtin.mode == .Debug) {
+                std.log.warn("The allocator detected leaks!", .{});
+            }
+            unreachable;
+        }
+    }
+    const gpa = &general_purpose_allocator.allocator;
+
+    var mesh = try importMesh(gpa, "./data/basic.obj");
     defer mesh.deinit();
 
     try sdl.init(sdl.InitFlags.everything);

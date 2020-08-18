@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const log = std.log.scoped(.navmesh);
+
 /// Polygonal mesh structure that allows searching paths and navigating on the mesh surface.
 pub const NavMesh = struct {
     const Self = @This();
@@ -43,17 +45,18 @@ pub const NavMesh = struct {
 
         const polygons = try arena.allocator.alloc(Polygon, polygons_len);
         for (polygons) |*poly| {
-            const poly_size = try reader.readIntLittle(u64);
+            poly.* = Polygon{
+                .vertices = undefined,
+                .adjacent_polygons = undefined,
+            };
 
-            const poly_verts = try arena.allocator.alloc(usize, poly_size);
-            for (poly_verts) |*vert_index| {
+            for (poly.vertices) |*vert_index| {
                 vert_index.* = try reader.readIntLittle(u64);
                 if (vert_index.* >= vertices.len)
                     return error.InvalidData;
             }
 
-            const poly_adj = try arena.allocator.alloc(?usize, poly_size);
-            for (poly_adj) |*maybe_poly| {
+            for (poly.adjacent_polygons) |*maybe_poly| {
                 const index = try reader.readIntLittle(u64);
                 maybe_poly.* = if (index != std.math.maxInt(u64))
                     if (index < polygons.len)
@@ -63,11 +66,6 @@ pub const NavMesh = struct {
                 else
                     null;
             }
-
-            poly.* = Polygon{
-                .vertices = poly_verts,
-                .adjacent_polygons = poly_adj,
-            };
         }
 
         return NavMesh{
@@ -97,8 +95,6 @@ pub const NavMesh = struct {
 
         for (self.polygons) |poly| {
             std.debug.assert(poly.vertices.len == poly.adjacent_polygons.len);
-            try writer.writeIntLittle(u64, poly.vertices.len);
-
             for (poly.vertices) |vert_index| {
                 try writer.writeIntLittle(u64, vert_index);
             }
@@ -122,10 +118,10 @@ pub const Polygon = struct {
     const Self = @This();
 
     /// The vertex coordinates of the polygon. Each entry is an index into `NavMesh.vertices`.
-    vertices: []usize,
+    vertices: [3]usize,
 
     /// Adjacent polygons that are connected at vertex `[i]` and `[(i+1)%N]`. Each entry is an index into `NavMesh.polygons`.
-    adjacent_polygons: []?usize,
+    adjacent_polygons: [3]?usize,
 
     pub fn getEdge(self: Self, index: usize) Edge {
         return Edge{
@@ -149,6 +145,39 @@ pub const Vertex = struct {
         return std.math.approxEq(f32, a.x, b.x, epsilon) and std.math.approxEq(f32, a.y, b.y, epsilon) and std.math.approxEq(f32, a.z, b.z, epsilon);
     }
 };
+
+// Use vertices as "just positions"
+fn cross(a: Vertex, b: Vertex) Vertex {
+    return Vertex{
+        .x = a.y * b.z - a.z * b.y,
+        .y = a.z * b.x - a.x * b.z,
+        .z = a.x * b.y - a.y * b.x,
+    };
+}
+
+fn dot(a: Vertex, b: Vertex) f32 {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+fn length(v: Vertex) f32 {
+    return std.math.sqrt(dot(v, v));
+}
+
+fn scale(v: Vertex, f: f32) Vertex {
+    return Vertex{
+        .x = v.x * f,
+        .y = v.x * f,
+        .z = v.x * f,
+    };
+}
+
+fn sub(a: Vertex, b: Vertex) Vertex {
+    return Vertex{
+        .x = a.x - b.x,
+        .y = a.y - b.y,
+        .z = a.z - b.z,
+    };
+}
 
 /// Helper structure that allows building a optimized NavMesh.
 pub const Builder = struct {
@@ -194,11 +223,6 @@ pub const Builder = struct {
         mesh.polygons = try mesh.arena.allocator.dupe(Polygon, polygons);
         mesh.vertices = try mesh.arena.allocator.dupe(Vertex, vertices);
 
-        for (mesh.polygons) |*poly, i| {
-            poly.vertices = try mesh.arena.allocator.dupe(usize, poly.vertices);
-            poly.adjacent_polygons = try mesh.arena.allocator.dupe(?usize, poly.adjacent_polygons);
-        }
-
         return mesh;
     }
 
@@ -209,6 +233,54 @@ pub const Builder = struct {
     pub fn insert(self: *Self, polygon: []const Vertex) !void {
         std.debug.assert(polygon.len >= 3); // calling it with <3 elements is an API violation
 
+        // we only accept flat/planar polygons, check that and return an error if not
+        {
+            var p0 = polygon[0];
+            var p1 = polygon[1];
+            var p2 = polygon[2];
+
+            const t0 = sub(p1, p0);
+            const t1 = sub(p2, p0);
+
+            const n_unscaled = cross(t0, t1);
+            const n = scale(n_unscaled, 1.0 / length(n_unscaled));
+
+            var index: usize = 3;
+            while (index < polygon.len) : (index += 1) {
+                const p = polygon[index];
+
+                const v = sub(p, p0);
+                const dist = dot(v, n);
+
+                if (std.math.fabs(dist) > self.vertex_epsilon) {
+                    log.warn("Polygon is not planar. Vertex {} has distance of {} to plane!\n", .{
+                        index,
+                        dist,
+                    });
+                    return error.PolygonNotPlanar;
+                }
+            }
+        }
+
+        // Triangulating a convex polygon is easy: just fan out the polygon
+        // see also: https://en.wikipedia.org/wiki/Fan_triangulation
+        {
+            var index: usize = 2;
+            while (index < polygon.len) : (index += 1) {
+                const triangle = [3]Vertex{
+                    polygon[0],
+                    polygon[index - 1],
+                    polygon[index - 0],
+                };
+                try self.insertTriangle(triangle);
+            }
+        }
+    }
+
+    /// Inserts the given triangle into the mesh.
+    /// Note that this is a fairly slow process and might not be efficient, if you don't need a dynamic NavMesh,
+    /// consider pregenerating it and store a serialized version.
+    pub fn insertTriangle(self: *Self, triangle: [3]Vertex) !void {
         const polygon_index = self.polygons.items.len;
         const vertex_count = self.vertices.items.len;
 
@@ -223,9 +295,9 @@ pub const Builder = struct {
         }
 
         var unique_vertices: usize = 0;
-        const vertices = try self.arena.allocator.alloc(usize, polygon.len);
+        var vertices: [3]usize = undefined;
         for (vertices) |*vert, index| {
-            const insert_vertex = polygon[index];
+            const insert_vertex = triangle[index];
             vert.* = for (self.vertices.items) |v, i| {
                 if (insert_vertex.eql(v, self.vertex_epsilon))
                     break i;
@@ -265,14 +337,13 @@ pub const Builder = struct {
                 // we found a polygon with which is included in all vertices:
                 // this means this polygon or a "superset" already exists,
                 // we can ignore this one
-                self.arena.allocator.free(vertices);
                 return;
             }
         }
 
         var result = Polygon{
             .vertices = vertices,
-            .adjacent_polygons = try self.arena.allocator.alloc(?usize, polygon.len),
+            .adjacent_polygons = [_]?usize{ null, null, null },
         };
 
         for (result.adjacent_polygons) |*adj_poly_index, index| {
@@ -351,8 +422,8 @@ test "NavMesh Builder" {
 
     std.testing.expectEqual(@as(usize, 1), mesh.polygons.len);
 
-    std.testing.expectEqualSlices(usize, &[_]usize{ 0, 1, 2 }, mesh.polygons[0].vertices);
-    std.testing.expectEqualSlices(?usize, &[_]?usize{ null, null, null }, mesh.polygons[0].adjacent_polygons);
+    std.testing.expectEqualSlices(usize, &[_]usize{ 0, 1, 2 }, &mesh.polygons[0].vertices);
+    std.testing.expectEqualSlices(?usize, &[_]?usize{ null, null, null }, &mesh.polygons[0].adjacent_polygons);
 }
 
 test "NavMesh Builder (vertex deduplication)" {
@@ -383,11 +454,11 @@ test "NavMesh Builder (vertex deduplication)" {
 
     std.testing.expectEqual(@as(usize, 2), mesh.polygons.len);
 
-    std.testing.expectEqualSlices(usize, &[_]usize{ 0, 1, 2 }, mesh.polygons[0].vertices);
-    std.testing.expectEqualSlices(?usize, &[_]?usize{ 1, null, null }, mesh.polygons[0].adjacent_polygons);
+    std.testing.expectEqualSlices(usize, &[_]usize{ 0, 1, 2 }, &mesh.polygons[0].vertices);
+    std.testing.expectEqualSlices(?usize, &[_]?usize{ 1, null, null }, &mesh.polygons[0].adjacent_polygons);
 
-    std.testing.expectEqualSlices(usize, &[_]usize{ 0, 1, 3 }, mesh.polygons[1].vertices);
-    std.testing.expectEqualSlices(?usize, &[_]?usize{ 0, null, null }, mesh.polygons[1].adjacent_polygons);
+    std.testing.expectEqualSlices(usize, &[_]usize{ 0, 1, 3 }, &mesh.polygons[1].vertices);
+    std.testing.expectEqualSlices(?usize, &[_]?usize{ 0, null, null }, &mesh.polygons[1].adjacent_polygons);
 }
 
 test "NavMesh Builder (polygon deduplication)" {
@@ -417,8 +488,8 @@ test "NavMesh Builder (polygon deduplication)" {
 
     std.testing.expectEqual(@as(usize, 1), mesh.polygons.len);
 
-    std.testing.expectEqualSlices(usize, &[_]usize{ 0, 1, 2 }, mesh.polygons[0].vertices);
-    std.testing.expectEqualSlices(?usize, &[_]?usize{ null, null, null }, mesh.polygons[0].adjacent_polygons);
+    std.testing.expectEqualSlices(usize, &[_]usize{ 0, 1, 2 }, &mesh.polygons[0].vertices);
+    std.testing.expectEqualSlices(?usize, &[_]?usize{ null, null, null }, &mesh.polygons[0].adjacent_polygons);
 }
 
 test "NavMesh Builder (error.DuplicatedVertex)" {
@@ -500,7 +571,7 @@ test "NavMesh (Serialize/Deserialize)" {
     std.testing.expectEqual(src_mesh.polygons.len, dst_mesh.polygons.len);
     for (src_mesh.polygons) |truth, i| {
         const tested = dst_mesh.polygons[i];
-        std.testing.expectEqualSlices(usize, truth.vertices, tested.vertices);
-        std.testing.expectEqualSlices(?usize, truth.adjacent_polygons, tested.adjacent_polygons);
+        std.testing.expectEqualSlices(usize, &truth.vertices, &tested.vertices);
+        std.testing.expectEqualSlices(?usize, &truth.adjacent_polygons, &tested.adjacent_polygons);
     }
 }
